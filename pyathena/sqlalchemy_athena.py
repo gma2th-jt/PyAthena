@@ -244,12 +244,13 @@ class AthenaDDLCompiler(DDLCompiler):
                     )
                 )
 
-        const = self.create_table_constraints(
-            table,
-            _include_foreign_key_constraints=create.include_foreign_key_constraints,
-        )
-        if const:
-            text += separator + "\t" + const
+        # Athena does not support table constraint AFAIK
+        # const = self.create_table_constraints(
+        #     table,
+        #     _include_foreign_key_constraints=create.include_foreign_key_constraints,
+        # )
+        # if const:
+        #     text += separator + "\t" + const
 
         text += "\n)\n%s\n\n" % self.post_create_table(table)
         return text
@@ -298,6 +299,25 @@ class AthenaDDLCompiler(DDLCompiler):
                 )
 
         return text
+
+    def get_column_specification(self, column, **kwargs):
+        colspec = (
+            self.preparer.format_column(column)
+            + " "
+            + self.dialect.type_compiler.process(column.type, type_expression=column)
+        )
+        # Athena does not support column default
+        # default = self.get_column_default_string(column)
+        # if default is not None:
+        #     colspec += " DEFAULT " + default
+
+        if column.computed is not None:
+            colspec += " " + self.process(column.computed)
+
+        # Athena does not support column nullable constraint default
+        # if not column.nullable:
+        #     colspec += " NOT NULL"
+        return colspec
 
 
 _TYPE_MAPPINGS = {
