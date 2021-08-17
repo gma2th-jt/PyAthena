@@ -288,7 +288,10 @@ class AthenaDDLCompiler(DDLCompiler):
                 " in the connection string."
             )
         schema = table.schema if table.schema else raw_connection.schema_name
-        text += "LOCATION '{0}{1}/{2}/'\n".format(location, schema, table.name)
+        athena_s3_prefix = table.kwargs.get('athena_s3_prefix')
+        prefix = athena_s3_prefix if athena_s3_prefix is not None else schema
+        location_suffix = prefix + '/' + table.name if prefix else table.name
+        text += "LOCATION '{0}{1}/'\n".format(location, location_suffix)
 
         tblproperties = table.kwargs.get('athena_tblproperties')
         if tblproperties:
