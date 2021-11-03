@@ -34,6 +34,10 @@ from tenacity import retry_if_exception, stop_after_attempt, wait_exponential
 import pyathena
 
 
+# TODO: is there a better place for those ?
+LIMIT_COMMENT_MEMBER = 255
+
+
 def _format_partitioned_by(properties: Dict[str, str]) -> str:
     """
     Examples:
@@ -66,6 +70,16 @@ def _format_tblproperties(properties: Dict[str, str]) -> str:
     """
     s = ',\n    '.join([f"'{k}'='{v}'" for k, v in properties.items()])
     return f"TBLPROPERTIES (\n    {s}\n)"
+
+
+def process_comment_literal(value, dialect):
+    """Comments in DDL statements are not escape in the same way as data listeral string
+    """
+    value = value.replace("'", r"\'")
+    if dialect.identifier_preparer._double_percents:
+        value = value.replace("%", "%%")
+
+    return "'%s'" % value
 
 
 class UniversalSet(object):
@@ -317,6 +331,10 @@ class AthenaDDLCompiler(DDLCompiler):
         # default = self.get_column_default_string(column)
         # if default is not None:
         #     colspec += " DEFAULT " + default
+        comment = ''
+        if column.comment:
+            comment = process_comment_literal(column.comment[:LIMIT_COMMENT_MEMBER],
+                                              self.dialect)
 
         if column.computed is not None:
             colspec += " " + self.process(column.computed)
@@ -324,7 +342,7 @@ class AthenaDDLCompiler(DDLCompiler):
         # Athena does not support column nullable constraint default
         # if not column.nullable:
         #     colspec += " NOT NULL"
-        return colspec
+        return f"{colspec}{' COMMENT ' if comment else ''}{comment}"
 
 
 _TYPE_MAPPINGS = {
