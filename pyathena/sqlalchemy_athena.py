@@ -343,8 +343,9 @@ class AthenaDDLCompiler(DDLCompiler):
                 squash_blanks=True,
             )
 
-        if column.computed is not None:
-            colspec += " " + self.process(column.computed)
+        # I don't think Athena supports computed columns
+        # if column.computed is not None:
+        #     colspec += " " + self.process(column.computed)
 
         # Athena does not support column nullable constraint default
         # if not column.nullable:
