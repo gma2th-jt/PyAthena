@@ -335,9 +335,9 @@ class AthenaDDLCompiler(DDLCompiler):
         if column.comment:
             comment = process_comment_literal(column.comment[:LIMIT_COMMENT_MEMBER],
                                               self.dialect)
-
-        if column.computed is not None:
-            colspec += " " + self.process(column.computed)
+        # I don't think Athena supports computed columns
+        # if column.computed is not None:
+        #     colspec += " " + self.process(column.computed)
 
         # Athena does not support column nullable constraint default
         # if not column.nullable:
