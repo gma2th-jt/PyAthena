@@ -2,9 +2,8 @@
 import math
 import numbers
 import re
-import operator
 from distutils.util import strtobool
-from typing import Tuple, Dict
+from typing import Dict
 
 import tenacity
 from sqlalchemy import exc, util
