@@ -36,6 +36,10 @@ import pyathena
 BLANKS = re.compile(r"\s\s*")
 # TODO: is there a better place for those ?
 LIMIT_COMMENT_MEMBER = 255
+# TODO: experimented with this. Not sure there is a limit. Still happy with
+# more than 128kB. Maybe we should put the column comments here instead of
+# truncating them in an arbitrary way.
+LIMIT_COMMENT_TABLE = None
 
 
 def _format_partitioned_by(properties: Dict[str, str]) -> str:
@@ -282,6 +286,14 @@ class AthenaDDLCompiler(DDLCompiler):
     def post_create_table(self, table):
         text = ""
 
+        if table.comment:
+            text += (
+                " COMMENT "
+                + process_comment_literal(
+                    table.comment[:LIMIT_COMMENT_TABLE], self.dialect
+                )
+                + "\n"
+            )
         partitioned_by = table.kwargs.get("athena_partitioned_by")
         if partitioned_by:
             text += _format_partitioned_by(partitioned_by) + "\n"
