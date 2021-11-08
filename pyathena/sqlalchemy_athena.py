@@ -33,6 +33,7 @@ from tenacity import retry_if_exception, stop_after_attempt, wait_exponential
 import pyathena
 
 
+BLANKS = re.compile(r'\s\s*')
 # TODO: is there a better place for those ?
 LIMIT_COMMENT_MEMBER = 255
 # TODO: experimented with this. Not sure there is a limit. Still happy with
@@ -79,6 +80,17 @@ def process_comment_literal(value, dialect):
     """Comments in DDL statements are not escape in the same way as data listeral string
     """
     value = value.replace("'", r"\'")
+    if dialect.identifier_preparer._double_percents:
+        value = value.replace("%", "%%")
+
+    return "'%s'" % value
+
+
+def process_column_comment_literal(value, dialect):
+    """Comments in DDL statements are not escape in the same way as data listeral string
+    """
+    value = value.replace("'", r"\'")
+    value = BLANKS.sub(' ', value)  # Replace blanks with plain spaces
     if dialect.identifier_preparer._double_percents:
         value = value.replace("%", "%%")
 
@@ -341,8 +353,8 @@ class AthenaDDLCompiler(DDLCompiler):
         #     colspec += " DEFAULT " + default
         comment = ''
         if column.comment:
-            comment = process_comment_literal(column.comment[:LIMIT_COMMENT_MEMBER],
-                                              self.dialect)
+            comment = process_column_comment_literal(column.comment[:LIMIT_COMMENT_MEMBER],
+                                                     self.dialect)
         # I don't think Athena supports computed columns
         # if column.computed is not None:
         #     colspec += " " + self.process(column.computed)
