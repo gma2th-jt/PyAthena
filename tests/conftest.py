@@ -1,11 +1,13 @@
 # -*- coding: utf-8 -*-
 import contextlib
 import os
+from typing import Any, Callable, Dict
 import uuid
 
 import pytest
 
 from pyathena import connect
+from pyathena.sqlalchemy_athena import AthenaDialect
 from tests import BASE_PATH, ENV, S3_PREFIX, SCHEMA
 from tests.util import read_query
 
@@ -76,3 +78,63 @@ def _create_table(cursor):
                 location_execute_many_pandas=location_execute_many_pandas,
             )
         )
+
+
+@pytest.fixture(params=(
+    pytest.param({'s3_dir': 's3://some-bucket'}, id='s3_dir overrides'),
+    pytest.param({'s3_dir': 's3://some-bucket/'}, id='s3_dir tailing slash'),
+    pytest.param({'s3_dir': 's3://some-bucket/',
+                  's3_prefix': '/prefix',
+                  }, id='dialect overrides: s3_dir tailing slash, s3_prefix left slash'),
+    pytest.param({'s3_dir': 's3://some-bucket/',
+                  's3_prefix': 'prefix/',
+                  }, id='dialect overrides: s3_dir tailing slash, s3_prefix right slash'),
+    pytest.param({'s3_dir': 's3://some-bucket/',
+                  's3_prefix': '/prefix/',
+                  }, id='dialect overrides: s3_dir tailing slash, s3_prefix both slash'),
+))
+def dialect_overrides(request) -> Dict[str, str]:
+    overrides: Dict[str, Any] = request.param
+    return overrides
+
+
+@pytest.fixture()
+def dialect(dialect_overrides: Dict[str, str]) -> AthenaDialect:
+    return AthenaDialect(**dialect_overrides)
+
+
+@pytest.fixture(params=(
+    pytest.param({}, id='no table overrides'),
+    pytest.param({'s3_dir': 's3://some-table-override-bucket'}, id='table: s3_dir'),
+    pytest.param({'schema': 'schema_name'}, id='table: schema'),
+    pytest.param({'s3_prefix': '/prefix/'}, id='table: s3_prefix'),
+    pytest.param({'s3_prefix': '/prefix/',
+                  'schema': 'schema_name',
+                  }, id='table: s3_prefix, schema'),
+))
+def table_overrides(request) -> Dict[str, str]:
+    return {f'awsathena_{k}' if not k.startswith('awsathena_') and k not in ('schema') else k: v
+            for k, v in request.param.items()}
+
+
+@pytest.fixture
+def value_getter(dialect, dialect_overrides, table_overrides) -> Callable[[str], str]:
+    def _value_getter(key: str) -> str:
+        if(key == 's3_prefix'
+           and 'schema' in table_overrides
+           and f'awsathena_{key}' not in table_overrides
+           and key not in dialect_overrides):
+            value = table_overrides['schema']
+        elif f'awsathena_{key}' in table_overrides:
+            value = table_overrides[f'awsathena_{key}']
+        elif key in dialect_overrides:
+            value = dialect_overrides[key]
+        else:
+            value = [v[1][key]
+                     for v in AthenaDialect.construct_arguments if v[0] is Table][0]
+        if key == 's3_prefix':
+            return value.strip('/')
+        else:
+            return value.rstrip('/')
+    return _value_getter
+
