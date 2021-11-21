@@ -284,6 +284,14 @@ class AthenaDDLCompiler(DDLCompiler):
         return text
 
     def post_create_table(self, table):
+        dialect_kwargs = {**[values
+                             for k, values in self.dialect.construct_arguments
+                             if table.__class__ == k][0],
+                          **{k.replace(f"{self.dialect.name}_", ''): v
+                             for k, v in table.dialect_kwargs.items()
+                             if k.startswith(f"{self.dialect.name}_")
+                             }
+                          }
         text = ""
 
         if table.comment:
@@ -294,48 +302,62 @@ class AthenaDDLCompiler(DDLCompiler):
                 )
                 + "\n"
             )
-        partitioned_by = table.kwargs.get("athena_partitioned_by")
+        partitioned_by = dialect_kwargs["partitioned_by"]
         if partitioned_by:
             text += _format_partitioned_by(partitioned_by) + "\n"
 
-        stored_as = table.kwargs.get("athena_stored_as")
-        if stored_as:
-            text += f"STORED AS {stored_as}\n"
+        row_format = dialect_kwargs["row_format"]
+        stored_as = dialect_kwargs["stored_as"]
+        if row_format and stored_as not in (_DEFAULT, "TEXTFILE"):
+            # User explicitly specified conflicting args.
+            raise exc.ArgumentError(
+                "Conflicting dialect arguments: row_format & stored_as.",
+                " You should only use one or the other",
+            )
+        stored_as = "TEXTFILE" if row_format else stored_as
+        # From this point on, either row format is not set
+        # or it is set and then store_as is either equal to TEXTFILE
+        assert not row_format or stored_as == "TEXTFILE"
+        assert not stored_as or (
+            stored_as != "TEXTFILE" or (row_format and stored_as == "TEXTFILE")
+        )
 
-        row_format = table.kwargs.get("athena_row_format")
         if row_format:
             text += f"ROW FORMAT {row_format}\n"
 
-        # Keep default as parquet
-        if not stored_as and not row_format:
-            text += "STORED AS PARQUET\n"
+        if stored_as:
+            stored_as = "PARQUET" if stored_as is _DEFAULT else stored_as
+            text += f"STORED AS {stored_as}\n"
 
-        raw_connection = table.bind.raw_connection()
-        location = (
-            raw_connection._kwargs["s3_dir"]
-            if "s3_dir" in raw_connection._kwargs
-            else raw_connection.s3_staging_dir
-        )
-        if not location:
+        s3_dir = dialect_kwargs["s3_dir"].rstrip('/')
+        if not s3_dir:
             raise exc.CompileError(
-                "`s3_dir` or `s3_staging_dir` parameter is required"
-                " in the connection string."
+                "`s3_dir` parameter must be defined either at the table level"
+                " as a dialect keyword argument or on the connection string."
             )
-        schema = table.schema if table.schema else raw_connection.schema_name
-        athena_s3_prefix = table.kwargs.get("athena_s3_prefix")
-        prefix = athena_s3_prefix if athena_s3_prefix is not None else schema
-        location_suffix = prefix + "/" + table.name if prefix else table.name
-        text += "LOCATION '{0}{1}/'\n".format(location, location_suffix)
 
-        tblproperties = table.kwargs.get("athena_tblproperties")
+        s3_prefix = ''
+        if table.schema:
+            s3_prefix = table.schema
+        else:
+            # Should probably get rid of the "database" dialect kwargs and
+            # use "database" as the default "s3_prefix" value.
+            s3_prefix = dialect_kwargs["database"] or ''
+        if dialect_kwargs['s3_prefix']:
+            s3_prefix = dialect_kwargs['s3_prefix']
+
+        s3_prefix = s3_prefix.strip('/')
+        text += f"LOCATION '{s3_dir}{'/' if s3_prefix else ''}{s3_prefix}/{table.name}'\n"
+
+        tblproperties = dialect_kwargs["tblproperties"]
         if tblproperties:
             text += _format_tblproperties(tblproperties) + "\n"
-        else:
-            compression = raw_connection._kwargs.get("compression")
-            if compression:
-                text += "TBLPROPERTIES ('parquet.compress'='{0}')\n".format(
-                    compression.upper()
-                )
+        # else:
+        #     compression = raw_connection._kwargs.get("compression")
+        #     if compression:
+        #         text += "TBLPROPERTIES ('parquet.compress'='{0}')\n".format(
+        #             compression.upper()
+        #         )
 
         return text
 
@@ -451,7 +473,35 @@ class AthenaDialect(DefaultDialect):
             return connection.raw_connection()
         return connection.connection
 
+    def _extract_dialect_kwargs_defaults(self, url):
+        """Extracts dialect kwargs from the connection URL to overrides the instance's defaults
+
+        The dialect provides defaults for all of its defined kwargs. This method
+        allows to override the global defaults, on a per Dialect instance basis.
+
+        Those can be further overrode, on a per constrcut basis.
+
+        Limitations: if a same dialect kwargs name is used for several construct
+        we assume those should have the same value. If the don't, they should be
+        named differently.
+
+        DOES NOT WORK :-( in that the SchemaItem.dialect_options() never receives the dialect
+        instance and hence always fetches the dialect kwargs default value at the Dialect class
+        level (check the diff between self.__class__.construct_arguments, self.construct_arguments)
+        """
+        kwargs = {'database': url.database, **url.query}
+        new_construct_defaults = {}
+        for construct, global_defaults in self.construct_arguments:
+            new_construct_defaults[construct] = defaults = {}
+            for k, v in global_defaults.items():
+                if k in kwargs:
+                    defaults[k] = kwargs.pop(k)
+                else:
+                    defaults[k] = v
+        self.construct_arguments = list(new_construct_defaults.items())
+
     def create_connect_args(self, url):
+        self._extract_dialect_kwargs_defaults(url)
         # Connection string format:
         #   awsathena+rest://
         #   {aws_access_key_id}:{aws_secret_access_key}@athena.{region_name}.amazonaws.com:443/
