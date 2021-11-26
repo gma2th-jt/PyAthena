@@ -1,15 +1,17 @@
 # -*- coding: utf-8 -*-
+import copy
 import math
 import numbers
 import re
 from distutils.util import strtobool
-from typing import Dict
+from typing import Any, Dict, List, Mapping, Tuple
 
 import tenacity
-from sqlalchemy import exc, util
+from sqlalchemy import exc, schema, util
 from sqlalchemy.engine import Engine, reflection
 from sqlalchemy.engine.default import DefaultDialect
 from sqlalchemy.exc import NoSuchTableError, OperationalError
+from sqlalchemy.sql.base import DialectKWArgs
 from sqlalchemy.sql.compiler import (
     DDLCompiler,
     GenericTypeCompiler,
@@ -32,6 +34,7 @@ from tenacity import retry_if_exception, stop_after_attempt, wait_exponential
 
 import pyathena
 
+_DEFAULT = object()  # Use to mark a dialect option as being left unspecified
 BLANKS = re.compile(r"\s\s*")
 # TODO: is there a better place for those ?
 LIMIT_COMMENT_MEMBER = 255
@@ -412,6 +415,32 @@ class AthenaDialect(DefaultDialect):
         r"(((Database|Namespace)\ (?P<schema>.+))|(Table\ (?P<table>.+)))\ not\ found\."
     )
     _pattern_column_type = re.compile(r"^([a-zA-Z]+)($|\(.+\)$)")
+    construct_arguments: List[Tuple[DialectKWArgs, Mapping[str, Any]]] = [
+        (
+            schema.Table,
+            {
+                "database": None,  # TODO: only keep ``s3_prefix``
+                "partitioned_by": None,
+                "row_format": None,
+                "s3_prefix": '',
+                "s3_dir": None,
+                "stored_as": _DEFAULT,
+                "tblproperties": tuple(),
+            },
+        ),
+    ]
+
+    # Could help catch kwargs passed via create_engine(<URL>, s3_dir=..., s3_staging_dir=..., ...)
+    def __init__(self, s3_dir=None, s3_prefix=None, s3_staging_prefix=None, *args, **kwargs):
+        super().__init__(self, *args, **kwargs)
+        construct_arguments = []
+        for k, v in self.construct_arguments:
+            if k is schema.Table and (s3_dir or s3_prefix):
+                v = copy.copy(v)
+                v['s3_prefix'] = s3_prefix or ''
+                v['s3_dir'] = s3_dir
+            construct_arguments.append((k, v, ))
+        self.construct_arguments = construct_arguments
 
     @classmethod
     def dbapi(cls):
