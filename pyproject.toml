@@ -1,6 +1,7 @@
 [tool.poetry]
 name = "PyAthena"
-version = "2.2.0"  # https://github.com/laughingman7743/PyAthena/blob/master/pyathena/__init__.py#L7
+version = "2.2.0"
+# https://github.com/laughingman7743/PyAthena/blob/master/pyathena/__init__.py#L7
 description = "Python DB API 2.0 (PEP 249) client for Amazon Athena"
 license = "MIT"
 classifiers = [
@@ -63,5 +64,7 @@ sqlalchemy = ["sqlalchemy"]
 "awsathena.rest" = "pyathena.sqlalchemy_athena:AthenaDialect"
 
 [build-system]
-requires = ["poetry-core>=1.0.0"]
-build-backend = "poetry.core.masonry.api"
+# requires = ["poetry-core>=1.0.0"]
+# build-backend = "poetry.core.masonry.api"
+requires = ["setuptools>=59.0.0,<60.0", "wheel"]
+build-backend = "setuptools.build_meta"
