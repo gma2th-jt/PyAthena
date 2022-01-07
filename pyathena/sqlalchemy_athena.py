@@ -6,6 +6,7 @@ from distutils.util import strtobool
 from typing import Dict
 
 import tenacity
+from sqlalchemy.ext.compiler import compiles
 from sqlalchemy import exc, util
 from sqlalchemy.engine import Engine, reflection
 from sqlalchemy.engine.default import DefaultDialect
@@ -32,6 +33,8 @@ from tenacity import retry_if_exception, stop_after_attempt, wait_exponential
 
 import pyathena
 
+
+DIALECT_NAME = 'awsathena'
 
 BLANKS = re.compile(r'\s\s*')
 # TODO: is there a better place for those ?
@@ -141,6 +144,14 @@ class AthenaStatementCompiler(SQLCompiler):
 
     def visit_char_length_func(self, fn, **kw):
         return "length{0}".format(self.function_argspec(fn, **kw))
+
+
+@compiles(INTEGER, DIALECT_NAME)
+def visit_INTEGER(element, ddlcompiler, **kw):
+    """Athena uses different expressions for integer depending on the type of query.
+    int for DDL, integer for DML. We overwrite DDL type here.
+    """
+    return 'int'
 
 
 class AthenaTypeCompiler(GenericTypeCompiler):
@@ -388,7 +399,7 @@ _TYPE_MAPPINGS = {
 
 class AthenaDialect(DefaultDialect):
 
-    name = "awsathena"
+    name = DIALECT_NAME
     driver = "rest"
     preparer = AthenaDMLIdentifierPreparer
     statement_compiler = AthenaStatementCompiler
