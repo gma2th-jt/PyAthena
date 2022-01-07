@@ -3,8 +3,10 @@ import math
 import numbers
 import re
 from distutils.util import strtobool
+from typing import Dict
 
 import tenacity
+from sqlalchemy.ext.compiler import compiles
 from sqlalchemy import exc, util
 from sqlalchemy.engine import Engine, reflection
 from sqlalchemy.engine.default import DefaultDialect
@@ -30,6 +32,72 @@ from sqlalchemy.sql.sqltypes import (
 from tenacity import retry_if_exception, stop_after_attempt, wait_exponential
 
 import pyathena
+
+
+DIALECT_NAME = 'awsathena'
+
+BLANKS = re.compile(r'\s\s*')
+# TODO: is there a better place for those ?
+LIMIT_COMMENT_MEMBER = 255
+# TODO: experimented with this. Not sure there is a limit. Still happy with
+# more than 128kB. Maybe we should put the column comments here instead of
+# truncating them in an arbitrary way.
+LIMIT_COMMENT_TABLE = None
+
+
+def _format_partitioned_by(properties: Dict[str, str]) -> str:
+    """
+    Examples:
+        >>> print(_format_partitioned_by({'a': 'b'}))
+        PARTITIONED BY (
+            a b
+        )
+        >>> print(_format_partitioned_by({'a': 'b', 'c': 'd'}))
+        PARTITIONED BY (
+            a b,
+            c d
+        )
+    """
+    s = ',\n    '.join([f"{k} {v}" for k, v in properties.items()])
+    return f"PARTITIONED BY (\n    {s}\n)"
+
+
+def _format_tblproperties(properties: Dict[str, str]) -> str:
+    """
+    Example:
+        >>> print(_format_tblproperties({'a': 'b'}))
+        TBLPROPERTIES (
+            'a'='b'
+        )
+        >>> print(_format_tblproperties({'a': 'b', 'c': 'd'}))
+        TBLPROPERTIES (
+            'a'='b',
+            'c'='d'
+        )
+    """
+    s = ',\n    '.join([f"'{k}'='{v}'" for k, v in properties.items()])
+    return f"TBLPROPERTIES (\n    {s}\n)"
+
+
+def process_comment_literal(value, dialect):
+    """Comments in DDL statements are not escape in the same way as data listeral string
+    """
+    value = value.replace("'", r"\'")
+    if dialect.identifier_preparer._double_percents:
+        value = value.replace("%", "%%")
+
+    return "'%s'" % value
+
+
+def process_column_comment_literal(value, dialect):
+    """Comments in DDL statements are not escape in the same way as data listeral string
+    """
+    value = value.replace("'", r"\'")
+    value = BLANKS.sub(' ', value)  # Replace blanks with plain spaces
+    if dialect.identifier_preparer._double_percents:
+        value = value.replace("%", "%%")
+
+    return "'%s'" % value
 
 
 class UniversalSet(object):
@@ -76,6 +144,14 @@ class AthenaStatementCompiler(SQLCompiler):
 
     def visit_char_length_func(self, fn, **kw):
         return "length{0}".format(self.function_argspec(fn, **kw))
+
+
+@compiles(INTEGER, DIALECT_NAME)
+def visit_INTEGER(element, ddlcompiler, **kw):
+    """Athena uses different expressions for integer depending on the type of query.
+    int for DDL, integer for DML. We overwrite DDL type here.
+    """
+    return 'int'
 
 
 class AthenaTypeCompiler(GenericTypeCompiler):
@@ -153,6 +229,10 @@ class AthenaTypeCompiler(GenericTypeCompiler):
     def visit_BOOLEAN(self, type_, **kw):
         return "BOOLEAN"
 
+    def visit_ARRAY(self, type_, **kw):
+        # TODO: Handle visit of item type
+        return f"ARRAY<{self.process(type_.item_type)}>"
+
 
 class AthenaDDLCompiler(DDLCompiler):
     @property
@@ -204,21 +284,42 @@ class AthenaDDLCompiler(DDLCompiler):
                     )
                 )
 
-        const = self.create_table_constraints(
-            table,
-            _include_foreign_key_constraints=create.include_foreign_key_constraints,
-        )
-        if const:
-            text += separator + "\t" + const
+        # Athena does not support table constraint AFAIK
+        # const = self.create_table_constraints(
+        #     table,
+        #     _include_foreign_key_constraints=create.include_foreign_key_constraints,
+        # )
+        # if const:
+        #     text += separator + "\t" + const
 
         text += "\n)\n%s\n\n" % self.post_create_table(table)
         return text
 
     def post_create_table(self, table):
-        raw_connection = table.bind.raw_connection()
-        # TODO Supports orc, avro, json, csv or tsv format
-        text = "STORED AS PARQUET\n"
+        text = ""
 
+        if table.comment:
+            text += (' COMMENT '
+                     + process_comment_literal(table.comment[:LIMIT_COMMENT_TABLE],
+                                               self.dialect)
+                     + '\n')
+        partitioned_by = table.kwargs.get('athena_partitioned_by')
+        if partitioned_by:
+            text += _format_partitioned_by(partitioned_by) + '\n'
+
+        stored_as = table.kwargs.get('athena_stored_as')
+        if stored_as:
+            text += f"STORED AS {stored_as}\n"
+
+        row_format = table.kwargs.get('athena_row_format')
+        if row_format:
+            text += f"ROW FORMAT {row_format}\n"
+
+        # Keep default as parquet
+        if not stored_as and not row_format:
+            text += "STORED AS PARQUET\n"
+
+        raw_connection = table.bind.raw_connection()
         location = (
             raw_connection._kwargs["s3_dir"]
             if "s3_dir" in raw_connection._kwargs
@@ -230,15 +331,47 @@ class AthenaDDLCompiler(DDLCompiler):
                 " in the connection string."
             )
         schema = table.schema if table.schema else raw_connection.schema_name
-        text += "LOCATION '{0}{1}/{2}/'\n".format(location, schema, table.name)
+        athena_s3_prefix = table.kwargs.get('athena_s3_prefix')
+        prefix = athena_s3_prefix if athena_s3_prefix is not None else schema
+        location_suffix = prefix + '/' + table.name if prefix else table.name
+        text += "LOCATION '{0}{1}/'\n".format(location, location_suffix)
 
-        compression = raw_connection._kwargs.get("compression")
-        if compression:
-            text += "TBLPROPERTIES ('parquet.compress'='{0}')\n".format(
-                compression.upper()
-            )
+        tblproperties = table.kwargs.get('athena_tblproperties')
+        if tblproperties:
+            text += _format_tblproperties(tblproperties) + '\n'
+        else:
+            compression = raw_connection._kwargs.get("compression")
+            if compression:
+                text += "TBLPROPERTIES ('parquet.compress'='{0}')\n".format(
+                    compression.upper()
+                )
 
         return text
+
+    def get_column_specification(self, column, **kwargs):
+        colspec = (
+            self.preparer.format_column(column)
+            + " "
+            + self.dialect.type_compiler.process(
+                column.type, type_expression=column
+            )
+        )
+        # Athena does not support column default
+        # default = self.get_column_default_string(column)
+        # if default is not None:
+        #     colspec += " DEFAULT " + default
+        comment = ''
+        if column.comment:
+            comment = process_column_comment_literal(column.comment[:LIMIT_COMMENT_MEMBER],
+                                                     self.dialect)
+        # I don't think Athena supports computed columns
+        # if column.computed is not None:
+        #     colspec += " " + self.process(column.computed)
+
+        # Athena does not support column nullable constraint default
+        # if not column.nullable:
+        #     colspec += " NOT NULL"
+        return f"{colspec}{' COMMENT ' if comment else ''}{comment}"
 
 
 _TYPE_MAPPINGS = {
@@ -264,7 +397,7 @@ _TYPE_MAPPINGS = {
 
 class AthenaDialect(DefaultDialect):
 
-    name = "awsathena"
+    name = DIALECT_NAME
     driver = "rest"
     preparer = AthenaDMLIdentifierPreparer
     statement_compiler = AthenaStatementCompiler
