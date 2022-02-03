@@ -18,6 +18,7 @@ from sqlalchemy.sql.compiler import (
     IdentifierPreparer,
     SQLCompiler,
 )
+from sqlalchemy.ext.compiler import compiles
 from sqlalchemy.sql.sqltypes import (
     BIGINT,
     BINARY,
@@ -140,6 +141,14 @@ class AthenaStatementCompiler(SQLCompiler):
 
     def visit_char_length_func(self, fn, **kw):
         return "length{0}".format(self.function_argspec(fn, **kw))
+
+
+@compiles(INTEGER, 'awsathena')
+def visit_INTEGER(element, ddlcompiler, **kw):
+    """Athena uses different expressions for integer depending on the type of query.
+    int for DDL, integer for DML. We overwrite DDL type here.
+    """
+    return 'int'
 
 
 class AthenaTypeCompiler(GenericTypeCompiler):
